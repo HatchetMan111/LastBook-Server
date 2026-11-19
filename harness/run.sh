@@ -989,6 +989,25 @@ assert_exit 1 "$rc"
 assert_out "Bitte als root ausführen"
 if [[ $VERBOSE == 1 ]]; then dump_case; fi
 
+# ── Case 28: --model-base valid → lastbook.env enthält SURVIVAL_MODEL_BASE ──
+t "Install mit --model-base (Ollama)"
+reset_state
+seed_staged_library
+rc=$(run_installer_devnull --model-base http://127.0.0.1:11434)
+assert_exit 0 "$rc"
+assert_fcontains "$MK/opt/lastbook/app/lastbook.env" "SURVIVAL_MODEL_BASE=http://127.0.0.1:11434"
+assert_out "Assistant: aktiv"
+if [[ $VERBOSE == 1 ]]; then dump_case; fi
+
+# ── Case 29: --model-base nicht-loopback → abgelehnt ────────────────────────
+t "--model-base nicht-loopback → abgelehnt"
+reset_state
+rc=$(run_installer_devnull --model-base http://10.120.1.5:11434)
+assert_exit 1 "$rc"
+assert_out "nur loopback erlaubt"
+assert_no_calls "pct create"
+if [[ $VERBOSE == 1 ]]; then dump_case; fi
+
 # ── Case 27: pct create --start spawn fehlgeschlagen (Exit trotzdem 0) ──────
 t "Spawn fehlgeschlagen → Arch-Diagnose"
 reset_state

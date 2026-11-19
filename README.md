@@ -36,6 +36,7 @@ Am Ende der Installation erscheint der **Zugangs-Link mit Key**:
 | Option | Default | Bedeutung |
 |---|---|---|
 | `--pack NAME` | `small` | Bibliothekspack: **small** (~7,7 GB, 315 Einträge), **medium** (~67 GB, 9 696), **all** (~388 GB, 12 864) |
+| `--model-base URL` | – | Assistant aktivieren: OpenAI-kompatibler Modellserver **im CT, nur loopback** (z. B. `http://127.0.0.1:11434` bei Ollama) – siehe unten |
 | `--map ST` | – | US-Bundesstaat-Karte dazuladen, z. B. `TX` (2–9 GB je Staat) |
 | `--rootfs GB` | `32` | Disk. Empfehlung: small ≥ 32, medium ≥ 160, all ≥ 840 |
 | `--memory MB` | `2048` | RAM – Suche/Lesen/Karten brauchen mehr nicht |
@@ -73,12 +74,55 @@ Aktualisiert die App auf den aktuellen upstream-`main`-Stand; **Bibliothek und D
 - **Key ändern:** `pct exec <CT-ID> -- rm /opt/lastbook/LastbookData/derived/lan-key /opt/lastbook/data/derived/lan-key && pct exec <CT-ID> -- systemctl restart lastbook` (neuer Key erscheint beim nächsten `--status` und im Service-Log)
 - Loopback-Zugriffe im CT brauchen keinen Key; die Setup-API akzeptiert ohnehin nur Loopback (upstream-Sicherheitsdesign)
 
+## 🎬 Videos: „this video is saved in the av1 format"
+
+Diese Meldung kommt vom **Browser des Clients**, nicht vom Server: die App prüft per
+`canPlayType('video/mp4; codecs="av01.0.05M.08")`, ob dein Browser AV1 dekodieren kann
+(`web/app.js`). Die Pack-Videos liegen in gemischten Codecs (h264/av1/vp9).
+
+**Fix:** aktuellen Chrome/Chromium oder Firefox (>= 60, enthält dav1d-Softwaredecoder)
+verwenden – Zorin/Firefox-ESR aktualisieren genügt in der Regel. Der Server muss dafür
+nichts ändern. (Ein serverseitiges Transkodieren wäre ein Eingriff in die SHA-256-geprüfte
+Bibliothek und würde den upstream-Repair-Pfad stören – bewusst nicht gebaut.)
+
+## 🗺️ Karte: Deutschland/Europa
+
+Die Detailkarten von Lastbook sind **nur für die USA** verfügbar: die State-Maps basieren
+auf US-ZCTA-Zentroiden und USGS/NAIP-Quellen (`derived/packs/pack-spec.json`, alle
+`address_indexes` sind US-Staaten). Die **Base-Map** (im small-Pack enthalten) ist eine
+Welt-Übersicht ohne Straßendetail. Deutschland-/Europa-Daten gibt es upstream nicht –
+weder zum Nachladen noch als Pack. Optionen: upstream-Issue/Contribution (die
+`build_packs.py`-Pipeline auf OSM-Extract für DE erweitern) oder Base-Map akzeptieren.
+
 ## 💬 Chat / „Ask"-Tab (lokale KI)
 
-Die lokale KI (Gemma-4-26B-GGUF, ~17 GB Download, ~19 GB RAM zur Laufzeit) ist in diesem LXC **bewusst nicht installiert** – Suche, Lesen, Videos und Karten funktionieren vollständig ohne sie. Der „Ask"-Tab antwortet erst, wenn ein Modellserver vorhanden ist:
+Der Assistant ist **standardmäßig aus** – er braucht einen OpenAI-kompatiblen Modellserver
+`IM CONTAINER` und **nur Loopback-Adressen** (`assistant.py`: `/v1/chat/completions`,
+`/v1/models`, Host muss 127.0.0.1/localhost/[::1] sein).
 
-- externer Modellserver: `SURVIVAL_MODEL_BASE` auf `http://<loopback-IP>:19443` zeigen (upstream verlangt Loopback-Adresse), oder
-- das AI-Pack später über die Setup-API (`ai: true`) installieren – dafür braucht der CT ~40 GB RAM, **das ist ein VM-Kandidat**, nicht dieses LXC.
+### Assistant aktivieren (Ollama, klein genug für 2–4 GB RAM)
+
+Im Proxmox-Host ausführen (CT-ID anpassen, Default-RAM 2 GB – bei `--memory 4096` läuft mehr):
+
+```bash
+# 1) Ollama im CT installieren (curl ist im CT vorhanden)
+pct exec <CT-ID> -- bash -c 'curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION=install OLLAMA_MODELS=/opt/lastbook/ollama sh'
+# (falls die Install-Zeile anders heißt: einfach curl -fsSL https://ollama.com/install.sh | sh)
+
+# 2) kleines Modell laden (Qwen3-0.6B ≈ 700 MB – passt zu 2 GB RAM; bei 4 GB geht auch 1.7B)
+pct exec <CT-ID> -- ollama pull qwen3:0.6b
+
+# 3) Ollama als Service (lauscht standardmäßig auf 127.0.0.1:11434 ✓ loopback)
+pct exec <CT-ID> -- systemctl enable --now ollama
+
+# 4) Lastbook damit verbinden (schreibt SURVIVAL_MODEL_BASE in die Service-Umgebung)
+bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/LastBook-Server/main/install/lastbook.sh)" --update --model-base http://127.0.0.1:11434
+```
+
+Danach antwortet der „Ask"-Tab mit Quellenverweisen aus der Bibliothek. Deaktivieren:
+`--update --model-base http://127.0.0.1:1` – oder Zeile aus `/opt/lastbook/app/lastbook.env` löschen
+und `systemctl restart lastbook` im CT. Das offizielle upstream-AI-Pack (Gemma-4-26B, ~17 GB,
+~19 GB RAM) ist für dieses LXC zu groß – dafür wäre eine VM der richtige Ort.
 
 ## 🛠️ Troubleshooting
 

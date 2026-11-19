@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-INSTALLER_VERSION="1.0.3"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
+INSTALLER_VERSION="1.0.4"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
 APP_NAME="lastbook"
 UPSTREAM_OWNER="Immortal-Protocols"
 UPSTREAM_REPO="lastbook"
@@ -53,6 +53,9 @@ SSH_KEY_FILE=""             # aufgelöste Key-Datei für pct create
 PORT=8890                   # Lastbook-Server-Port (Original-Default)
 PACK="${PACK:-small}"       # Bibliothekspack: small (~7,7 GB) | medium (~67 GB) | all (~388 GB)
 MAP="${MAP:-}"              # optional: US-Bundesstaat-Karte dazuladen, z. B. TX (4–9 GB je Staat)
+MODEL_BASE="${MODEL_BASE:-}"  # optional: OpenAI-kompatibler Modellserver (nur loopback!) für den
+                              # Ask-Tab, z. B. http://127.0.0.1:11434 (Ollama) – sonst leer
+MODEL_BASE_SET=false
 SKIP_LIBRARY=false          # true = nur Server, Bibliothek später (siehe README)
 UNINSTALL=false
 UPDATE=false
@@ -318,6 +321,7 @@ parse_args() {
             --sshkey)        CT_SSHKEY="${args[$((i+1))]:-}"; i=$((i+2)) ;;
             --port)          PORT="${args[$((i+1))]:-}"; i=$((i+2)) ;;
             --pack)          PACK="${args[$((i+1))]:-}"; i=$((i+2)) ;;
+            --model-base)    MODEL_BASE="${args[$((i+1))]:-}"; MODEL_BASE_SET=true; i=$((i+2)) ;;
             --map)           MAP="${args[$((i+1))]:-}"; i=$((i+2)) ;;
             --skip-library)  SKIP_LIBRARY=true; i=$((i+1)) ;;
             --force)         FORCE_RECREATE=true; i=$((i+1)) ;;
@@ -338,6 +342,10 @@ parse_args() {
         small|medium|all) ;;
         *) die "Ungültiges Pack: '$PACK' (small, medium oder all – z. B. --pack medium)" ;;
     esac
+    if [[ -n "$MODEL_BASE" ]] && ! [[ "$MODEL_BASE" =~ ^http://(127\.0\.0\.1|localhost|\[::1\]|::1)(:[0-9]{1,5})?/?$ ]]; then
+        die "Ungültige --model-base: '$MODEL_BASE' (nur loopback erlaubt, z. B. http://127.0.0.1:11434 –
+  der upstream-Assistant verweigert Nicht-Loopback-Adressen selbst, siehe assistant.py)"
+    fi
     if [[ -n "$MAP" ]] && ! [[ "$MAP" =~ ^[A-Z]{2}$ ]]; then
         die "Ungültige Karte: '$MAP' (zweibuchstabiger US-Bundesstaat, z. B. --map TX)"
     fi
@@ -368,6 +376,9 @@ Optionen (hinter dem schließenden Anführungszeichen anhängen, z. B. ... " --p
   --sshkey PFAD    Public-Key-Datei oder URL – ssh-key-Login als root im CT
   --port PORT      Server-Port im Container (Default: 8890)
   --pack NAME      Bibliothekspack: small (7,7 GB, Default) | medium (67 GB) | all (388 GB)
+  --model-base URL Assistant aktivieren: OpenAI-kompatibler Modellserver im CT
+                   (NUR loopback, z. B. http://127.0.0.1:11434 bei Ollama; braucht
+                   RAM fürs Modell – empfohlen --memory 4096)
   --map ST         US-Bundesstaat-Karte dazuladen, z. B. --map TX (2–9 GB je Staat)
   --skip-library   Nur Server installieren; Bibliothek später nachziehen
                    (Befehl steht am Ende der Installation)
@@ -409,6 +420,7 @@ die(){ err "$1"; exit 1; }
 : "${LAN_KEY:?LAN_KEY fehlt (env)}"
 : "${TAR_URL:?TAR_URL fehlt (env)}"
 : "${REF:?REF fehlt (env)}"
+MODEL_BASE="${MODEL_BASE:-}"
 
 echo ">>> Resolver-Dateien lesbar für apt-Sandbox stellen (getent-ok/apt-tot-Grube) ..."
 chmod 0644 /etc/resolv.conf /etc/hosts /etc/hostname 2>/dev/null || true
@@ -471,6 +483,9 @@ if [ -f /opt/lastbook/app/lastbook.env ]; then
     # shellcheck disable=SC1091
     . /opt/lastbook/app/lastbook.env
 fi
+if [ -n "${SURVIVAL_MODEL_BASE:-}" ]; then
+    export SURVIVAL_MODEL_BASE
+fi
 DATA="/opt/lastbook/data"
 LIB="/opt/lastbook/LastbookData"
 CAT="${LIB}/library-data/catalog.json"
@@ -480,7 +495,12 @@ fi
 exec /opt/lastbook/app/venv/bin/python /opt/lastbook/app/server.py --lan --port "$PORT" --data "$DATA"
 SERVEEOF
 chmod +x "${APP_DIR}/serve.sh"
-printf 'PORT=%s\n' "${PORT}" > "${APP_DIR}/lastbook.env"
+{
+    printf 'PORT=%s\n' "${PORT}"
+    if [ -n "${MODEL_BASE}" ]; then
+        printf 'SURVIVAL_MODEL_BASE=%s\n' "${MODEL_BASE}"
+    fi
+} > "${APP_DIR}/lastbook.env"
 
 echo ">>> systemd-Unit (Restart=always, onboot macht den Rest) ..."
 cat > /etc/systemd/system/lastbook.service <<'UNITEOF'
@@ -804,6 +824,7 @@ run_inner_setup() {
     pct push "$ct_id" "$TMP_DIR/setup-inner.sh" /root/setup-inner.sh
     pct exec "$ct_id" -- env APP_DIR="$C_APP_DIR" DATA_STUB="$C_DATA_STUB" \
         DATA_LIB="$C_DATA_LIB" PORT="$PORT" LAN_KEY="$LAN_KEY" TAR_URL="$TAR_URL" REF="$INNER_REF" \
+        MODEL_BASE="$MODEL_BASE" \
         bash -c 'set -o pipefail; bash /root/setup-inner.sh 2>&1 | tee /var/log/lastbook-setup.log'
 }
 
@@ -923,6 +944,9 @@ print_summary() {
     echo "  pct exec ${CT_ID} -- rm ${C_DATA_LIB}/derived/lan-key ${C_DATA_STUB}/derived/lan-key && pct exec ${CT_ID} -- systemctl restart lastbook"
     echo ""
     if [[ "$has_lib" == "ja" ]]; then
+        if [[ -n "$MODEL_BASE" ]]; then
+            echo -e "  ${GREEN}  💬 Assistant: aktiv (SURVIVAL_MODEL_BASE=${MODEL_BASE})${NC}"
+        fi
         echo -e "  ${CYAN}Inhalt:${NC} Handbücher/Enzyklopädien/Videos/Offline-Karten (Pack: ${PACK}${MAP:+ + Karte ${MAP}})."
     else
         echo -e "  ${YELLOW}Bibliothek später nachziehen (SKIP_LIBRARY war gesetzt):${NC}"
@@ -935,9 +959,12 @@ print_summary() {
     echo "  Deinstall: ${ONE_LINER} --uninstall"
     echo "  Logs:      pct exec ${CT_ID} -- journalctl -u lastbook -e"
     echo ""
-    warn "Lokale KI (Chat-Antworten aus der Bibliothek, ~19 GB RAM) ist in diesem LXC bewusst"
-    warn "AUS – Suche, Lesen, Videos und Karten funktionieren vollständig ohne sie. Der"
-    warn "„Ask“-Tab braucht einen eigenen Modellserver (siehe README, SURVIVAL_MODEL_BASE)."
+    if [[ -z "$MODEL_BASE" ]]; then
+        warn "Der „Ask“-Tab (Assistant) ist AUS – er braucht einen OpenAI-kompatiblen Modellserver"
+        warn "im CT (nur loopback!). Einrichten mit:"
+        warn "  ${ONE_LINER} --update --model-base http://127.0.0.1:11434"
+        warn "  (README „Assistant aktivieren“ – Suche/Lesen/Videos/Karten laufen ohne ihn voll.)"
+    fi
 }
 
 # ── Install ────────────────────────────────────────────────────────────────
@@ -1117,6 +1144,11 @@ do_update() {
     # --update holt UPSTREAM_BRANCH (main); Installation selbst bleibt gepinnt.
     TAR_URL="https://codeload.github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/tar.gz/refs/heads/${UPSTREAM_BRANCH}"
     INNER_REF="main@$(date +%Y%m%d)"
+    # --model-base: explizit gewinnt, sonst bestehenden Wert aus dem CT behalten
+    if ! $MODEL_BASE_SET; then
+        MODEL_BASE=$(pct exec "$ct_id" -- sh -c "grep -s '^SURVIVAL_MODEL_BASE=' ${C_APP_DIR}/lastbook.env" 2>/dev/null | cut -d= -f2- | tail -n 1 || true)
+        MODEL_BASE="${MODEL_BASE%$'\r'}"
+    fi
     # LAN-Key vom CT ÜBERNEHMEN (stabil über Updates), sonst neu generieren
     LAN_KEY=$(get_active_lan_key "$ct_id")
     if [[ -z "$LAN_KEY" ]]; then
