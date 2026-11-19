@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-INSTALLER_VERSION="1.0.1"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
+INSTALLER_VERSION="1.0.2"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
 APP_NAME="lastbook"
 UPSTREAM_OWNER="Immortal-Protocols"
 UPSTREAM_REPO="lastbook"
@@ -980,20 +980,31 @@ do_install() {
     fi
 
     # Debian-Template sicherstellen (Debian 13 bevorzugt – libzim-Wheel braucht
-    # frisches Python; grep debian-1[23] + sort -rV wählt 13 vor 12)
+    # frisches Python; grep debian-1[23] + sort -rV wählt 13 vor 12).
+    # ARCH-BEWUSST (Live-Fund CT 207): im Cache können amd64 UND arm64 liegen –
+    # sort -rV würde _arm64 vor _amd64 wählen und ein arm64-Rootfs startet auf
+    # amd64-Hosts nicht (sync_wait: Failed to spawn). Filter auf die Host-Arch.
     header "🧱 Container-Template"
+    local host_arch=""
+    host_arch=$(dpkg --print-architecture 2>/dev/null || uname -m || true)
+    case "$host_arch" in
+        x86_64|amd64)   host_arch="amd64" ;;
+        aarch64|arm64)  host_arch="arm64" ;;
+        *) die "Nicht unterstützte Host-Architektur: '${host_arch}' (amd64/arm64 erwartet)" ;;
+    esac
+    info "Host-Architektur: ${host_arch}"
     local template=""
-    template=$(pveam list local 2>/dev/null | awk '{print $1}' | grep -o 'debian-1[23]-standard[^ ]*' | sort -rV | head -1 || true)
+    template=$(pveam list local 2>/dev/null | awk '{print $1}' | grep -o "debian-1[23]-standard[^ ]*_${host_arch}\.tar\.zst" | sort -rV | head -1 || true)
     if [[ -z "$template" ]]; then
-        info "Kein Debian-12/13-Template vorhanden – lade es herunter ..."
+        info "Kein Debian-12/13-${host_arch}-Template vorhanden – lade es herunter ..."
         pveam update
-        template=$(pveam available --section system 2>/dev/null | grep -o 'debian-1[23]-standard[^ ]*' | sort -rV | head -1 || true)
+        template=$(pveam available --section system 2>/dev/null | grep -o "debian-1[23]-standard[^ ]*_${host_arch}\.tar\.zst" | sort -rV | head -1 || true)
         if [[ -z "$template" ]]; then
-            die "Kein debian-12/13-standard-Template gefunden (pveam available leer?)."
+            die "Kein debian-12/13-standard_${host_arch}-Template gefunden (pveam available leer oder ohne diese Architektur?)."
         fi
         pveam download local "$template"
     fi
-    ok "Template: $template"
+    ok "Template: $template (arch ${host_arch})"
 
     # ID & Passwort & LAN-Key
     if [[ -z "$CT_ID" ]]; then
@@ -1048,7 +1059,26 @@ do_install() {
         --start 1 \
         --password "$CT_PASSWORD" \
         "${ssh_keys_args[@]}"
-    ok "Container $CT_ID erstellt und gestartet"
+    ok "Container $CT_ID erstellt"
+    # pct create --start 1 meldet gescheiterten Spawn NICHT über den Exit-Code
+    # (sync_wait-Fehler nur auf stderr) – Status aktiv verifizieren.
+    local start_ok="" i
+    for i in $(seq 1 15); do
+        if [[ "$(pct status "$CT_ID" 2>/dev/null | awk '{print $2}')" == "running" ]]; then
+            start_ok=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ -z "$start_ok" ]]; then
+        die "Container $CT_ID startet nicht (pct create --start lief trotzdem Exit 0).
+
+  Häufigste Ursache: Template-Architektur passt nicht zum Host.
+  Prüfe: pct config $CT_ID | grep arch && dpkg --print-architecture
+  Aufräumen: pct destroy $CT_ID --purge
+  Neu:  ${ONE_LINER} --force"
+    fi
+    ok "Container läuft"
 
     wait_for_ct_network "$CT_ID"
     verify_ct_dns "$CT_ID"

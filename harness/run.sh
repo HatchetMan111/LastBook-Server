@@ -171,6 +171,13 @@ case "$cmd" in
         fi
         { echo "TEMPLATE=$tmpl"; echo "ARGS=$*"; } > "$HS/ct_${id}.create"
         hostname="ct-$id"
+        if [[ -f "$HS/create_nostart" ]]; then
+            # pct create --start: Spawn gescheitert, aber Exit 0 (Live-Fund CT 207)
+            echo "$id stopped $hostname" >> "$HS/ct_list"
+            echo "stopped" > "$HS/ct_${id}.status"
+            echo "$hostname" > "$HS/ct_${id}.hostname"
+            exit 0
+        fi
         prev=""
         for a in "$@"; do
             if [[ "$prev" == "--hostname" ]]; then hostname="$a"; fi
@@ -258,22 +265,27 @@ cat > "$MK/mock-pveam" <<'EOF'
 set -u
 HS="${HARNESS_STATE:?}"
 echo "pveam $*" >> "$HS/calls.log"
-TMPL="local:vztmpl/debian-13-standard_13.2-1_amd64.tar.zst"
+TMPL_AMD="local:vztmpl/debian-13-standard_13.2-1_amd64.tar.zst"
+TMPL_ARM="local:vztmpl/debian-13-standard_13.2-1_arm64.tar.zst"
 case "${1:-}" in
     list)
         if [[ -f "$HS/template_downloaded" && ! -f "$HS/pveam_empty" ]]; then
-            echo "$TMPL  123456789"
+            # Beide Varianten im Cache (Live-Fall CT 207): Installer muss arch-filtern!
+            echo "$TMPL_ARM  123456789"
+            echo "$TMPL_AMD  123456789"
         fi
         exit 0 ;;
     available)
         if [[ ! -f "$HS/pveam_empty" ]]; then
-            echo "system          $TMPL  123456789"
+            echo "system          $TMPL_ARM  123456789"
+            echo "system          $TMPL_AMD  123456789"
         fi
         exit 0 ;;
     update)   exit 0 ;;
     download)
         mkdir -p "$HS/templates"
         touch "$HS/templates/debian-13-standard_13.2-1_amd64.tar.zst"
+        touch "$HS/templates/debian-13-standard_13.2-1_arm64.tar.zst"
         touch "$HS/template_downloaded"
         exit 0 ;;
 esac
@@ -683,6 +695,7 @@ seed_staged_library
 rc=$(run_installer_devnull)
 assert_exit 0 "$rc"
 assert_calls 1 "pct create 200 local:vztmpl/debian-13-standard"
+assert_fregex "$HS/ct_200.create" "TEMPLATE=.*_amd64\.tar\.zst"
 assert_fcontains "$HS/ct_200.create" "--hostname lastbook"
 assert_fcontains "$HS/ct_200.create" "--unprivileged 1"
 assert_fcontains "$HS/ct_200.create" "--features nesting=1"
@@ -964,6 +977,18 @@ rc=$( ( env -i PATH="$HOSTBIN:/usr/bin:/bin" HARNESS_STATE="$HS" HOME=/root TERM
         bash "$SCRIPT" < /dev/null > "$CUR_DIR/out.log" 2>&1 ); echo $? )
 assert_exit 1 "$rc"
 assert_out "Bitte als root ausführen"
+if [[ $VERBOSE == 1 ]]; then dump_case; fi
+
+# ── Case 27: pct create --start spawn fehlgeschlagen (Exit trotzdem 0) ──────
+t "Spawn fehlgeschlagen → Arch-Diagnose"
+reset_state
+touch "$HS/create_nostart"
+seed_staged_library
+rc=$(run_installer_devnull)
+assert_exit 1 "$rc"
+assert_out "Container 200 startet nicht"
+assert_out "Template-Architektur"
+assert_out "pct destroy 200 --purge"
 if [[ $VERBOSE == 1 ]]; then dump_case; fi
 
 # ── Case 26: --help ─────────────────────────────────────────────────────────
