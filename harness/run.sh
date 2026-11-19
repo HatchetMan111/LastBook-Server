@@ -101,13 +101,14 @@ ln -sf "$MK/mock-sleep" "$INNERBIN/sleep"
 # Inner-Fakebin: echtes Python3 (Wrapper), kein curl/apt/systemctl vor apt
 link_real "$INNERBIN" bash sh env awk sed grep cut head tail tr od seq cat mv cp rm \
     mkdir chmod dirname basename sort uniq printf ls touch readlink stat uname date \
-    tee openssl wc ln tar gzip
+    tee openssl wc ln tar gzip id chown
 # test ist ein dash-Builtin – `command -v` liefert den Namen selbst → Self-Symlink.
 ln -sf /usr/bin/test "$INNERBIN/test"
 ln -sf "$MK/mock-aptget"    "$INNERBIN/apt-get"
 ln -sf "$MK/mock-systemctl" "$INNERBIN/systemctl"
 ln -sf "$MK/mock-getent"    "$INNERBIN/getent"
 ln -sf "$MK/mock-python3"   "$INNERBIN/python3"
+ln -sf "$MK/mock-ollama"    "$INNERBIN/ollama"
 ln -sf "$MK/mock-hostname"  "$INNERBIN/hostname"
 ln -sf "$MK/mock-ip"        "$INNERBIN/ip"
 
@@ -325,7 +326,28 @@ case "$url" in
         echo "<html>mock</html>" > "$APP/web/index.html"
         /bin/tar -czf "$outfile" -C "$APP" . 2>/dev/null || /bin/tar -czf "$outfile" -C "$MK/tarball-src" .
         exit 0 ;;
+    https://ollama.com/install.sh)
+        # Install-Stub: installiert ollama-Binary + Service-Unit (Mock)
+        cat <<'OLLSTUB'
+#!/usr/bin/env bash
+INNERBIN_DIR="${MKROOT:?MKROOT fehlt}/bin-inner"
+ln -sf "$MKROOT/mock-ollama" "$INNERBIN_DIR/ollama" 2>/dev/null
+mkdir -p "${MKROOT:?}/etc/systemd/system"
+touch "${MKROOT:?}/etc/systemd/system/ollama.service"
+echo ">>> ollama mock-installed"
+exit 0
+OLLSTUB
+        exit 0 ;;
 esac
+
+# Inner-Kontext: Ollama-API (11434) direkt beantworten
+if [[ -n "${MKROOT:-}" && "$url" == *"127.0.0.1:11434"* ]]; then
+    case "$url" in
+        */api/version*) echo '{"version":"0.1.34-mock"}'; exit 0 ;;
+        */v1/models*)   echo '{"object":"list","data":[{"id":"mock-model","object":"model"}]}'; exit 0 ;;
+        *)              echo '{"ok":true}'; exit 0 ;;
+    esac
+fi
 
 code="200"
 if [[ -f "$HS/host_curl_fail" && -z "${MKROOT:-}" ]]; then
@@ -374,6 +396,11 @@ case "$sub" in
     enable)
         mkdir -p "$unitdir"; echo "${2:-}" >> "$HS/enabled_units"; exit 0 ;;
     start|restart)
+        if [[ "${2:-}" == "ollama" ]]; then
+            [[ -f "$unitdir/ollama.service" ]] || { echo "mock: ollama.service fehlt" >&2; exit 1; }
+            touch "$HS/ollama_active"
+            exit 0
+        fi
         if [[ "${2:-}" == "lastbook" ]]; then
             [[ -f "$unitdir/lastbook.service" ]] || { echo "mock: lastbook.service fehlt" >&2; exit 1; }
             # ExecStart-Validierung (Live-Fund CT 207 #3: Unit zeigte auf alte
@@ -391,6 +418,7 @@ case "$sub" in
     is-active)
         svc="${3:-${2:-}}"
         if [[ "$svc" == "lastbook" && -f "$HS/lastbook_active" ]]; then exit 0; fi
+        if [[ "$svc" == "ollama" && -f "$HS/ollama_active" ]]; then exit 0; fi
         exit 3 ;;
     *) exit 0 ;;
 esac
@@ -574,6 +602,28 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
 PYEOF
+
+cat > "$MK/mock-ollama" <<'EOF'
+#!/usr/bin/env bash
+set -u
+HS="${HARNESS_STATE:?}"
+echo "ollama $*" >> "$HS/calls.log"
+sub="${1:-}"
+case "$sub" in
+    --version) echo "ollama version is 0.1.34-mock"; exit 0 ;;
+    list)
+        echo "NAME            ID              SIZE    MODIFIED"
+        if [[ -f "$HS/assist_model_pulled" ]]; then
+            echo "qwen3:0.6b      abc123mock      700MB   now"
+        fi
+        exit 0 ;;
+    pull)
+        touch "$HS/assist_model_pulled"
+        echo "pulling manifest ... success (mock)"
+        exit 0 ;;
+    *) exit 0 ;;
+esac
+EOF
 
 cat > "$MK/mock-hostname" <<'EOF'
 #!/usr/bin/env bash
@@ -987,6 +1037,35 @@ rc=$( ( env -i PATH="$HOSTBIN:/usr/bin:/bin" HARNESS_STATE="$HS" HOME=/root TERM
         bash "$SCRIPT" < /dev/null > "$CUR_DIR/out.log" 2>&1 ); echo $? )
 assert_exit 1 "$rc"
 assert_out "Bitte als root ausführen"
+if [[ $VERBOSE == 1 ]]; then dump_case; fi
+
+# ── Case 30: --assistant nativ (Ollama-Mock) ────────────────────────────────
+t "Install --assistant (Ollama nativ)"
+reset_state
+seed_staged_library
+rc=$(run_installer_devnull --assistant)
+assert_exit 0 "$rc"
+assert_calls 1 "ollama pull qwen3:0.6b"
+assert_fcontains "$MK/opt/lastbook/app/lastbook.env" "SURVIVAL_MODEL_BASE=http://127.0.0.1:11434"
+assert_file "$MK/opt/lastbook/setup-assistant.sh"
+assert_file "$MK/etc/systemd/system/ollama.service.d/lastbook.conf"
+assert_out "Assistant aktiv: qwen3:0.6b"
+assert_out "💬 Assistant: aktiv"
+assert_calls 1 "/opt/lastbook/setup-assistant.sh"
+if [[ $VERBOSE == 1 ]]; then dump_case; fi
+
+# ── Case 31: --assistant-remove löst die Verkabelung ────────────────────────
+t "Update --assistant-remove"
+seed_ct
+printf 'PORT=8890\nSURVIVAL_MODEL_BASE=http://127.0.0.1:11434\n' > "$MK/opt/lastbook/app/lastbook.env"
+rc=$(run_installer_devnull --update --assistant-remove)
+assert_exit 0 "$rc"
+assert_fregex "$MK/opt/lastbook/app/lastbook.env" "^PORT=8890$"
+if /bin/grep -q "SURVIVAL_MODEL_BASE" "$MK/opt/lastbook/app/lastbook.env"; then
+    fail "SURVIVAL_MODEL_BASE noch in lastbook.env (sollte weg sein)"
+else
+    pass "SURVIVAL_MODEL_BASE entfernt"
+fi
 if [[ $VERBOSE == 1 ]]; then dump_case; fi
 
 # ── Case 28: --model-base valid → lastbook.env enthält SURVIVAL_MODEL_BASE ──

@@ -36,7 +36,10 @@ Am Ende der Installation erscheint der **Zugangs-Link mit Key**:
 | Option | Default | Bedeutung |
 |---|---|---|
 | `--pack NAME` | `small` | Bibliothekspack: **small** (~7,7 GB, 315 Einträge), **medium** (~67 GB, 9 696), **all** (~388 GB, 12 864) |
-| `--model-base URL` | – | Assistant aktivieren: OpenAI-kompatibler Modellserver **im CT, nur loopback** (z. B. `http://127.0.0.1:11434` bei Ollama) – siehe unten |
+| `--model-base URL` | – | Assistant an eigenen Modellserver binden (nur loopback) |
+| `--assistant` | aus | 💬 Assistant **nativ** aktivieren: Ollama im CT installieren + Modell (nach RAM 0.6b/1.7b) + verkabeln |
+| `--assistant-model NAME` | – | Modell wählen (impliziert `--assistant`) |
+| `--assistant-remove` | – | Assistant-Verkabelung lösen (Ollama bleibt) |
 | `--map ST` | – | US-Bundesstaat-Karte dazuladen, z. B. `TX` (2–9 GB je Staat) |
 | `--rootfs GB` | `32` | Disk. Empfehlung: small ≥ 32, medium ≥ 160, all ≥ 840 |
 | `--memory MB` | `2048` | RAM – Suche/Lesen/Karten brauchen mehr nicht |
@@ -100,29 +103,33 @@ Der Assistant ist **standardmäßig aus** – er braucht einen OpenAI-kompatible
 `IM CONTAINER` und **nur Loopback-Adressen** (`assistant.py`: `/v1/chat/completions`,
 `/v1/models`, Host muss 127.0.0.1/localhost/[::1] sein).
 
-### Assistant aktivieren (Ollama, klein genug für 2–4 GB RAM)
-
-Im Proxmox-Host ausführen (CT-ID anpassen, Default-RAM 2 GB – bei `--memory 4096` läuft mehr):
+### Assistant nativ aktivieren (Einzeiler)
 
 ```bash
-# 1) Ollama im CT installieren (curl ist im CT vorhanden)
-pct exec <CT-ID> -- bash -c 'curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION=install OLLAMA_MODELS=/opt/lastbook/ollama sh'
-# (falls die Install-Zeile anders heißt: einfach curl -fsSL https://ollama.com/install.sh | sh)
-
-# 2) kleines Modell laden (Qwen3-0.6B ≈ 700 MB – passt zu 2 GB RAM; bei 4 GB geht auch 1.7B)
-pct exec <CT-ID> -- ollama pull qwen3:0.6b
-
-# 3) Ollama als Service (lauscht standardmäßig auf 127.0.0.1:11434 ✓ loopback)
-pct exec <CT-ID> -- systemctl enable --now ollama
-
-# 4) Lastbook damit verbinden (schreibt SURVIVAL_MODEL_BASE in die Service-Umgebung)
-bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/LastBook-Server/main/install/lastbook.sh)" --update --model-base http://127.0.0.1:11434
+bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/LastBook-Server/main/install/lastbook.sh)" --update --assistant
 ```
 
-Danach antwortet der „Ask"-Tab mit Quellenverweisen aus der Bibliothek. Deaktivieren:
-`--update --model-base http://127.0.0.1:1` – oder Zeile aus `/opt/lastbook/app/lastbook.env` löschen
-und `systemctl restart lastbook` im CT. Das offizielle upstream-AI-Pack (Gemma-4-26B, ~17 GB,
+Das installiert **im CT** den kompletten Stack (idempotent, wiederholbar):
+1. Ollama (offizielles Install-Script, falls fehlend), Modelle unter `/opt/lastbook/ollama`
+2. Service `ollama` auf **127.0.0.1:11434** (loopback – upstream-Pflicht, `assistant.py`)
+3. Modell nach RAM: `< 3,5 GB → qwen3:0.6b` (~700 MB), sonst `qwen3:1.7b` – Skip, wenn schon da
+4. `SURVIVAL_MODEL_BASE` in die Lastbook-Service-Umgebung + Neustart + Verifikation über `/v1/models`
+
+Danach antwortet der „Ask"-Tab mit Quellenverweisen aus der Bibliothek. Varianten:
+
+```bash
+... " --update --assistant --assistant-model qwen3:1.7b   # Modell explizit (impliziert --assistant)
+... " --update --assistant-remove                          # Verkabelung lösen (Ollama bleibt installiert)
+... " --update --model-base http://127.0.0.1:1234          # eigener OpenAI-kompatibler Server (nur loopback)
+```
+
+Status zeigt den Assistant-Zustand: `... " --status` → `Assistant: aktiv (SURVIVAL_MODEL_BASE=…)`.
+
+RAM-Hinweis: mit 2 GB läuft `qwen3:0.6b` knapp aber stabil; für `1.7b` das CT mit
+`--memory 4096` (neu) aufsetzen. Das offizielle upstream-AI-Pack (Gemma-4-26B, ~17 GB,
 ~19 GB RAM) ist für dieses LXC zu groß – dafür wäre eine VM der richtige Ort.
+Manuelles Setup ohne Installer-Flag: README-Historie bzw. `pct exec` mit
+`curl -fsSL https://ollama.com/install.sh | sh` + `ollama pull` + `--model-base`.
 
 ## 🛠️ Troubleshooting
 

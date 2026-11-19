@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-INSTALLER_VERSION="1.0.4"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
+INSTALLER_VERSION="1.0.5"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
 APP_NAME="lastbook"
 UPSTREAM_OWNER="Immortal-Protocols"
 UPSTREAM_REPO="lastbook"
@@ -56,6 +56,9 @@ MAP="${MAP:-}"              # optional: US-Bundesstaat-Karte dazuladen, z. B. TX
 MODEL_BASE="${MODEL_BASE:-}"  # optional: OpenAI-kompatibler Modellserver (nur loopback!) für den
                               # Ask-Tab, z. B. http://127.0.0.1:11434 (Ollama) – sonst leer
 MODEL_BASE_SET=false
+ASSISTANT=false              # true (--assistant): Ollama IM CT installieren + Modell + verkabeln
+ASSISTANT_REMOVE=false       # true (--assistant-remove): Assistant-Verkabelung lösen
+ASSISTANT_MODEL=""           # leer = automatisch (RAM-abhängig: <3,5 GB → qwen3:0.6b, sonst qwen3:1.7b)
 SKIP_LIBRARY=false          # true = nur Server, Bibliothek später (siehe README)
 UNINSTALL=false
 UPDATE=false
@@ -73,6 +76,7 @@ ONE_LINER='bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan11
 C_APP_DIR="/opt/lastbook/app"
 C_DATA_STUB="/opt/lastbook/data"
 C_DATA_LIB="/opt/lastbook/LastbookData"
+C_OLLAMA_DIR="/opt/lastbook/ollama"
 
 # ── Farben & Logging ───────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -116,6 +120,10 @@ on_error() {
             tail -n 40 /var/log/lastbook-setup.log 2>/dev/null
             echo "--- setup-library.log ---"
             tail -n 40 /var/log/lastbook-setup-library.log 2>/dev/null
+            echo "--- setup-assistant.log ---"
+            tail -n 20 /var/log/lastbook-assistant.log 2>/dev/null
+            echo "--- journalctl -u ollama ---"
+            journalctl -u ollama --no-pager 2>/dev/null | tail -n 10
             echo "--- journalctl -u lastbook ---"
             journalctl -u lastbook --no-pager 2>/dev/null | tail -n 25
             echo "--- Setup-Job (job.json) ---"
@@ -322,6 +330,9 @@ parse_args() {
             --port)          PORT="${args[$((i+1))]:-}"; i=$((i+2)) ;;
             --pack)          PACK="${args[$((i+1))]:-}"; i=$((i+2)) ;;
             --model-base)    MODEL_BASE="${args[$((i+1))]:-}"; MODEL_BASE_SET=true; i=$((i+2)) ;;
+            --assistant)     ASSISTANT=true; i=$((i+1)) ;;
+            --assistant-model) ASSISTANT_MODEL="${args[$((i+1))]:-}"; ASSISTANT=true; i=$((i+2)) ;;
+            --assistant-remove) ASSISTANT_REMOVE=true; i=$((i+1)) ;;
             --map)           MAP="${args[$((i+1))]:-}"; i=$((i+2)) ;;
             --skip-library)  SKIP_LIBRARY=true; i=$((i+1)) ;;
             --force)         FORCE_RECREATE=true; i=$((i+1)) ;;
@@ -345,6 +356,9 @@ parse_args() {
     if [[ -n "$MODEL_BASE" ]] && ! [[ "$MODEL_BASE" =~ ^http://(127\.0\.0\.1|localhost|\[::1\]|::1)(:[0-9]{1,5})?/?$ ]]; then
         die "Ungültige --model-base: '$MODEL_BASE' (nur loopback erlaubt, z. B. http://127.0.0.1:11434 –
   der upstream-Assistant verweigert Nicht-Loopback-Adressen selbst, siehe assistant.py)"
+    fi
+    if $ASSISTANT && $ASSISTANT_REMOVE; then
+        die "--assistant und --assistant-remove widersprechen sich."
     fi
     if [[ -n "$MAP" ]] && ! [[ "$MAP" =~ ^[A-Z]{2}$ ]]; then
         die "Ungültige Karte: '$MAP' (zweibuchstabiger US-Bundesstaat, z. B. --map TX)"
@@ -376,9 +390,14 @@ Optionen (hinter dem schließenden Anführungszeichen anhängen, z. B. ... " --p
   --sshkey PFAD    Public-Key-Datei oder URL – ssh-key-Login als root im CT
   --port PORT      Server-Port im Container (Default: 8890)
   --pack NAME      Bibliothekspack: small (7,7 GB, Default) | medium (67 GB) | all (388 GB)
-  --model-base URL Assistant aktivieren: OpenAI-kompatibler Modellserver im CT
-                   (NUR loopback, z. B. http://127.0.0.1:11434 bei Ollama; braucht
-                   RAM fürs Modell – empfohlen --memory 4096)
+  --assistant      💬 Assistant nativ aktivieren: installiert Ollama IM CT, startet den
+                   Service auf 127.0.0.1:11434, lädt qwen3 (Modell nach RAM: <3,5 GB →
+                   0.6b, sonst 1.7b) und verkabelt SURVIVAL_MODEL_BASE
+  --assistant-model NAME   Modell selbst wählen (impliziert --assistant), z. B.
+                   --assistant-model qwen3:1.7b
+  --assistant-remove       Assistant-Verkabelung lösen (Ollama bleibt installiert)
+  --model-base URL Assistant an EIGENEN Modellserver binden (NUR loopback, z. B.
+                   http://127.0.0.1:11434) – ohne Ollama-Installation
   --map ST         US-Bundesstaat-Karte dazuladen, z. B. --map TX (2–9 GB je Staat)
   --skip-library   Nur Server installieren; Bibliothek später nachziehen
                    (Befehl steht am Ende der Installation)
@@ -840,6 +859,158 @@ run_setup_library() {
         bash -c 'set -o pipefail; bash /opt/lastbook/setup-library.sh 2>&1 | tee /var/log/lastbook-setup-library.log'
 }
 
+# ── Assistant (--assistant): Ollama im CT installieren + Modell + verkabeln ──
+# ACHTUNG: QUOTETER Heredoc ('ASSEOF'). Alle Werte kommen via env (ASSIST_MODEL,
+# APP_DIR, ASSIST_REMOVE). Ollama lauscht per Default auf 127.0.0.1:11434 —
+# loopback, wie der upstream-Assistant es verlangt.
+write_setup_assistant_script() {
+    cat > "$TMP_DIR/setup-assistant.sh" <<'ASSEOF'
+#!/usr/bin/env bash
+# =============================================================================
+# LastBook Assistant-Setup (im CT ausführen, idempotent)
+# Installiert Ollama (wenn fehlend), Startet den Service auf 127.0.0.1:11434,
+# lädt das Modell (skip, wenn vorhanden) und verkabelt SURVIVAL_MODEL_BASE.
+# Variablen via env: ASSIST_MODEL, APP_DIR, ASSIST_REMOVE (0/1)
+# =============================================================================
+set -Eeuo pipefail
+trap 'echo "✘ Assistant-Setup-Fehler: exit $? in Zeile $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+
+err(){ echo "✘ $1" >&2; }
+die(){ err "$1"; exit 1; }
+
+: "${ASSIST_MODEL:?ASSIST_MODEL fehlt (env)}"
+: "${APP_DIR:?APP_DIR fehlt (env)}"
+: "${OLLAMA_DIR:?OLLAMA_DIR fehlt (env)}"
+ASSIST_REMOVE="${ASSIST_REMOVE:-0}"
+ENV_FILE="${APP_DIR}/lastbook.env"
+
+env_set_model() {   # SURVIVAL_MODEL_BASE-Zeile setzen (idempotent)
+    local line="$1"
+    if [ -f "$ENV_FILE" ]; then
+        grep -v '^SURVIVAL_MODEL_BASE=' "$ENV_FILE" > "${ENV_FILE}.new" || true
+    else
+        : > "${ENV_FILE}.new"
+    fi
+    printf '%s\n' "$line" >> "${ENV_FILE}.new"
+    mv "${ENV_FILE}.new" "$ENV_FILE"
+}
+env_clear_model() {
+    if [ -f "$ENV_FILE" ]; then
+        grep -v '^SURVIVAL_MODEL_BASE=' "$ENV_FILE" > "${ENV_FILE}.new" || true
+        mv "${ENV_FILE}.new" "$ENV_FILE"
+    fi
+}
+
+if [ "$ASSIST_REMOVE" = "1" ]; then
+    echo ">>> Assistant-Verkabelung lösen (SURVIVAL_MODEL_BASE entfernen) ..."
+    env_clear_model
+    systemctl restart lastbook
+    for _ in $(seq 1 30); do
+        curl -s -o /dev/null --max-time 2 http://127.0.0.1:8890/ && break
+        sleep 1
+    done
+    echo ">>> Assistant deaktiviert. Ollama bleibt installiert (ausschalten: systemctl disable --now ollama)."
+    echo ">>> FERTIG"
+    exit 0
+fi
+
+echo ">>> [1/5] Ollama prüfen/installieren ..."
+if ! command -v ollama >/dev/null 2>&1; then
+    curl -fsSL --retry 3 https://ollama.com/install.sh | sh
+else
+    echo "    Ollama vorhanden: $(ollama --version 2>/dev/null | head -1)"
+fi
+
+echo ">>> [2/5] Ollama-Service (Modelle unter /opt/lastbook/ollama) ..."
+mkdir -p "${OLLAMA_DIR}"
+mkdir -p /etc/systemd/system/ollama.service.d
+cat > /etc/systemd/system/ollama.service.d/lastbook.conf <<'DROPIN'
+[Service]
+Environment="OLLAMA_MODELS=/opt/lastbook/ollama"
+DROPIN
+if id ollama >/dev/null 2>&1; then
+    chown -R ollama:ollama "${OLLAMA_DIR}" || true
+fi
+systemctl daemon-reload
+systemctl enable --now ollama >/dev/null 2>&1 || systemctl restart ollama
+
+echo ">>> [3/5] Warte auf Ollama-API (127.0.0.1:11434) ..."
+API_OK=""
+for _ in $(seq 1 90); do
+    if curl -s -o /dev/null --max-time 2 http://127.0.0.1:11434/api/version; then
+        API_OK=1
+        break
+    fi
+    sleep 1
+done
+if [ -z "$API_OK" ]; then
+    err "Ollama-API nicht erreichbar."
+    journalctl -u ollama --no-pager 2>/dev/null | tail -n 15 || true
+    die "Ollama lauscht nicht auf 11434 (Trace oben).\n  Debug: pct exec \$(pct list | awk '/lastbook/{print \$1}') -- journalctl -u ollama -e"
+fi
+
+echo ">>> [4/5] Modell ${ASSIST_MODEL} laden (skip, wenn schon da) ..."
+if ollama list 2>/dev/null | grep -q "^${ASSIST_MODEL}[[:space:]]"; then
+    echo "    Modell bereits vorhanden."
+else
+    if ! ollama pull "${ASSIST_MODEL}"; then
+        echo "    pull fehlgeschlagen – ein Retry ..."
+        ollama pull "${ASSIST_MODEL}"
+    fi
+fi
+
+echo ">>> [5/5] Lastbook verbinden (SURVIVAL_MODEL_BASE) + Neustart ..."
+env_set_model "SURVIVAL_MODEL_BASE=http://127.0.0.1:11434"
+systemctl restart lastbook
+for _ in $(seq 1 30); do
+    curl -s -o /dev/null --max-time 2 http://127.0.0.1:8890/ && break
+    sleep 1
+done
+curl -s -o /dev/null --max-time 5 http://127.0.0.1:8890/ || die "Lastbook nach Neustart nicht erreichbar – journalctl -u lastbook -e"
+MODELS_JSON="$(curl -s --max-time 10 http://127.0.0.1:11434/v1/models || true)"
+echo "$MODELS_JSON" | grep -q '"id"' || die "Ollama /v1/models antwortet ohne Modelle (JSON oben).\n  Debug: pct exec \$(pct list | awk '/lastbook/{print \$1}') -- ollama list"
+echo "    /v1/models: $(echo "$MODELS_JSON" | head -c 120) ..."
+echo ">>> Assistant aktiv: ${ASSIST_MODEL} auf http://127.0.0.1:11434"
+echo ">>> FERTIG"
+ASSEOF
+}
+
+run_setup_assistant() {
+    local ct_id="$1"
+    local model="${ASSISTANT_MODEL:-}"
+    if [[ -z "$model" ]]; then
+        # RAM-abhängige Modellwahl: 0.6b (~0,7 GB) passt zu 2 GB, 1.7b braucht mehr
+        if [[ "$CT_MEMORY" -ge 3500 ]]; then
+            model="qwen3:1.7b"
+        else
+            model="qwen3:0.6b"
+        fi
+    fi
+    header "💬 Aktiviere Assistant (Ollama im CT, Modell: ${model})"
+    if [[ "$CT_MEMORY" -lt 2048 ]]; then
+        warn "Nur ${CT_MEMORY} MB RAM – qwen3:0.6b läuft, aber knapp (--memory 4096 empfohlen)."
+    fi
+    write_setup_assistant_script
+    pct push "$ct_id" "$TMP_DIR/setup-assistant.sh" /opt/lastbook/setup-assistant.sh
+    pct exec "$ct_id" -- chmod +x /opt/lastbook/setup-assistant.sh
+    pct exec "$ct_id" -- env ASSIST_MODEL="$model" APP_DIR="$C_APP_DIR" \
+        OLLAMA_DIR="$C_OLLAMA_DIR" ASSIST_REMOVE="0" \
+        bash -c 'set -o pipefail; bash /opt/lastbook/setup-assistant.sh 2>&1 | tee /var/log/lastbook-assistant.log'
+    MODEL_BASE="http://127.0.0.1:11434"
+}
+
+run_assistant_remove() {
+    local ct_id="$1"
+    header "💬 Deaktiviere Assistant (Verkabelung lösen)"
+    write_setup_assistant_script
+    pct push "$ct_id" "$TMP_DIR/setup-assistant.sh" /opt/lastbook/setup-assistant.sh
+    pct exec "$ct_id" -- env ASSIST_MODEL="x" APP_DIR="$C_APP_DIR" \
+        OLLAMA_DIR="$C_OLLAMA_DIR" ASSIST_REMOVE="1" \
+        bash -c 'set -o pipefail; bash /opt/lastbook/setup-assistant.sh 2>&1 | tee /var/log/lastbook-assistant.log'
+    MODEL_BASE=""
+}
+
 # ── Verifikation ───────────────────────────────────────────────────────────
 verify_installation() {
     local ct_id="$1" tries=0 code=""
@@ -960,10 +1131,9 @@ print_summary() {
     echo "  Logs:      pct exec ${CT_ID} -- journalctl -u lastbook -e"
     echo ""
     if [[ -z "$MODEL_BASE" ]]; then
-        warn "Der „Ask“-Tab (Assistant) ist AUS – er braucht einen OpenAI-kompatiblen Modellserver"
-        warn "im CT (nur loopback!). Einrichten mit:"
-        warn "  ${ONE_LINER} --update --model-base http://127.0.0.1:11434"
-        warn "  (README „Assistant aktivieren“ – Suche/Lesen/Videos/Karten laufen ohne ihn voll.)"
+        warn "Der „Ask“-Tab (Assistant) ist AUS – nativ aktivieren mit:"
+        warn "  ${ONE_LINER} --update --assistant"
+        warn "  (installiert Ollama im CT + kleines Modell; Suche/Lesen/Videos/Karten laufen ohne ihn voll.)"
     fi
 }
 
@@ -991,6 +1161,10 @@ do_install() {
     if [[ "$CT_ROOTFS" -lt "$min_gb" ]]; then
         warn "rootfs ${CT_ROOTFS} GB ist knapp für Pack '${PACK}' (empfohlen ≥ ${min_gb} GB)."
         warn "Bei 'no_space' im Setup: ${ONE_LINER} --force --rootfs ${min_gb} --pack ${PACK}"
+    fi
+    if $ASSISTANT && [[ "$CT_ROOTFS" -lt "$((min_gb + 4))" ]]; then
+        warn "--assistant braucht ~2-4 GB zusätzlich (Ollama + Modell) – rootfs ${CT_ROOTFS} GB ist knapp."
+        warn "Empfehlung: ${ONE_LINER} --force --rootfs $((min_gb + 8)) --pack ${PACK} --assistant"
     fi
 
     # Bereits vorhanden?
@@ -1123,6 +1297,11 @@ do_install() {
         run_setup_library "$CT_ID"
     fi
 
+    # Assistant nativ (--assistant: Ollama im CT installieren + verkabeln)
+    if $ASSISTANT; then
+        run_setup_assistant "$CT_ID"
+    fi
+
     verify_installation "$CT_ID"
     print_summary
 }
@@ -1164,6 +1343,13 @@ do_update() {
         warn "SKIP_LIBRARY gesetzt – Bibliotheks-Update übersprungen."
     else
         run_setup_library "$ct_id"
+    fi
+
+    # Assistant nativ mitziehen (--assistant installiert Ollama, --assistant-remove löst)
+    if $ASSISTANT_REMOVE; then
+        run_assistant_remove "$ct_id"
+    elif $ASSISTANT; then
+        run_setup_assistant "$ct_id"
     fi
 
     verify_installation "$ct_id"
@@ -1232,6 +1418,15 @@ do_status() {
     else
         err "Service:   lastbook läuft NICHT"
         info "Logs:      pct exec $ct_id -- journalctl -u lastbook -e"
+    fi
+
+    # Assistant-Status aus der Service-Umgebung (lastbook.env)
+    local mb=""
+    mb=$(pct exec "$ct_id" -- sh -c "grep -s '^SURVIVAL_MODEL_BASE=' ${C_APP_DIR}/lastbook.env" 2>/dev/null | cut -d= -f2- | tail -n 1 || true)
+    if [[ -n "$mb" ]]; then
+        ok "Assistant: aktiv (SURVIVAL_MODEL_BASE=${mb})"
+    else
+        info "Assistant: aus  →  ${ONE_LINER} --update --assistant"
     fi
 
     # Upstream-Stand (ref aus INSTALL-INFO)
