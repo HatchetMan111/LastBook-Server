@@ -103,11 +103,11 @@ pct exec <CT-ID> -- env PACK=small APP_DIR=/opt/lastbook/app DATA_STUB=/opt/last
 
 ```
 /opt/lastbook/app            Upstream-Code (server.py, engine/, web/)
-/opt/lastbook/venv           Python-Umgebung (libzim/numpy/bs4/pypdfium2)
+/opt/lastbook/app/venv      Python-Umgebung (libzim/numpy/bs4/pypdfium2)
 /opt/lastbook/data           Stub-Datenordner (Startbrücke, danach ungenutzt)
 /opt/lastbook/LastbookData   ECHTE Bibliothek (library-data/ + derived/) – die Daten
-/opt/lastbook/serve.sh       Starter: wählt aktiven Datenordner
-/opt/lastbook/setup-library.sh  Headless-Setup (idempotent, resume-fähig)
+/opt/lastbook/app/serve.sh  Starter: wählt aktiven Datenordner
+/opt/lastbook/setup-library.sh Headless-Setup (idempotent, resume-fähig)
 /etc/systemd/system/lastbook.service
 /var/log/lastbook-setup.log, /var/log/lastbook-setup-library.log
 ```

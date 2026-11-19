@@ -376,6 +376,13 @@ case "$sub" in
     start|restart)
         if [[ "${2:-}" == "lastbook" ]]; then
             [[ -f "$unitdir/lastbook.service" ]] || { echo "mock: lastbook.service fehlt" >&2; exit 1; }
+            # ExecStart-Validierung (Live-Fund CT 207 #3: Unit zeigte auf alte
+            # serve.sh-Lage → systemd 203/EXEC, Mock hatte das NICHT gefangen)
+            execpath=$(/bin/sed -n 's/^ExecStart=//p' "$unitdir/lastbook.service" | head -1)
+            if [[ -n "$execpath" ]]; then
+                execpath="${execpath//\/opt\/lastbook/$MK/opt/lastbook}"
+                [[ -x "$execpath" ]] || { echo "mock: ExecStart nicht ausführbar: $execpath (203/EXEC-Simulation)" >&2; exit 203; }
+            fi
             touch "$HS/lastbook_active"
         fi
         exit 0 ;;
@@ -644,9 +651,9 @@ seed_ct() { # laufender CT mit installiertem Stack (für Update/Status/Deinstall
     echo "lastbook" > "$HS/ct_200.hostname"
     mkdir -p "$MK/opt/lastbook/app" "$MK/opt/lastbook/LastbookData/library-data" \
         "$MK/opt/lastbook/LastbookData/derived" "$MK/opt/lastbook/data/derived" \
-        "$MK/opt/lastbook/venv/bin" "$MK/etc/systemd/system" "$MK/var/log"
-    printf '#!/usr/bin/env bash\nexec /usr/bin/python3 "$@"\n' > "$MK/opt/lastbook/venv/bin/python"
-    chmod +x "$MK/opt/lastbook/venv/bin/python"
+        "$MK/opt/lastbook/app/venv/bin" "$MK/etc/systemd/system" "$MK/var/log"
+    printf '#!/usr/bin/env bash\nexec /usr/bin/python3 "$@"\n' > "$MK/opt/lastbook/app/venv/bin/python"
+    chmod +x "$MK/opt/lastbook/app/venv/bin/python"
     echo "# mock server.py" > "$MK/opt/lastbook/app/server.py"
     printf 'ref=9e57ba27920ea4ef25ba93d3f8280edd41ab4a3c\nport=8890\n' > "$MK/opt/lastbook/app/INSTALL-INFO"
     printf '[{"id":"r1"},{"id":"r2"}]' > "$MK/opt/lastbook/LastbookData/library-data/catalog.json"
@@ -705,6 +712,9 @@ assert_file "$MK/opt/lastbook/setup-library.sh"
 assert_file "$MK/etc/systemd/system/lastbook.service"
 assert_fcontains "$MK/etc/systemd/system/lastbook.service" "Restart=always"
 assert_fcontains "$MK/etc/systemd/system/lastbook.service" "After=network-online.target"
+assert_fcontains "$MK/etc/systemd/system/lastbook.service" "ExecStart=/opt/lastbook/app/serve.sh"
+assert_fcontains "$MK/opt/lastbook/app/serve.sh" "/opt/lastbook/app/venv/bin/python"
+assert_fcontains "$MK/opt/lastbook/app/serve.sh" ". /opt/lastbook/app/lastbook.env"
 assert_calls 1 "/api/setup/start"
 assert_fcontains "$HS/last_start_body" '"pack": "small"'
 assert_fcontains "$HS/last_start_body" '"folder"'

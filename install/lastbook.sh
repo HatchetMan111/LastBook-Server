@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-INSTALLER_VERSION="1.0.2"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
+INSTALLER_VERSION="1.0.3"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
 APP_NAME="lastbook"
 UPSTREAM_OWNER="Immortal-Protocols"
 UPSTREAM_REPO="lastbook"
@@ -467,9 +467,9 @@ cat > "${APP_DIR}/serve.sh" <<'SERVEEOF'
 # LastbookData = echte Bibliothek (nach dem Headless-Setup), sonst Stub.
 set -euo pipefail
 PORT="${PORT:-8890}"
-if [ -f /opt/lastbook/lastbook.env ]; then
+if [ -f /opt/lastbook/app/lastbook.env ]; then
     # shellcheck disable=SC1091
-    . /opt/lastbook/lastbook.env
+    . /opt/lastbook/app/lastbook.env
 fi
 DATA="/opt/lastbook/data"
 LIB="/opt/lastbook/LastbookData"
@@ -477,7 +477,7 @@ CAT="${LIB}/library-data/catalog.json"
 if [ -s "$CAT" ] && [ "$(wc -c < "$CAT")" -gt 10 ]; then
     DATA="$LIB"
 fi
-exec /opt/lastbook/venv/bin/python /opt/lastbook/app/server.py --lan --port "$PORT" --data "$DATA"
+exec /opt/lastbook/app/venv/bin/python /opt/lastbook/app/server.py --lan --port "$PORT" --data "$DATA"
 SERVEEOF
 chmod +x "${APP_DIR}/serve.sh"
 printf 'PORT=%s\n' "${PORT}" > "${APP_DIR}/lastbook.env"
@@ -492,7 +492,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/lastbook/app
-ExecStart=/opt/lastbook/serve.sh
+ExecStart=/opt/lastbook/app/serve.sh
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
@@ -876,7 +876,7 @@ ${diag}"
     has_lib=$(pct exec "$ct_id" -- sh -c "[ -s ${C_DATA_LIB}/library-data/catalog.json ] && [ \$(wc -c < ${C_DATA_LIB}/library-data/catalog.json) -gt 10 ] && echo ja || echo nein" 2>/dev/null | tail -n 1 || true)
     if [[ "$has_lib" == "ja" ]]; then
         local records=""
-        records=$(pct exec "$ct_id" -- /opt/lastbook/venv/bin/python -I -c \
+        records=$(pct exec "$ct_id" -- ${C_APP_DIR}/venv/bin/python -I -c \
             "import json; print(len(json.load(open('${C_DATA_LIB}/library-data/catalog.json'))))" 2>/dev/null | tail -n 1 || true)
         ok "Bibliothek installiert (${records:-?} Einträge im Katalog)"
     else
@@ -1212,7 +1212,7 @@ do_status() {
     local has_lib="" records=""
     has_lib=$(pct exec "$ct_id" -- sh -c "[ -s ${C_DATA_LIB}/library-data/catalog.json ] && [ \$(wc -c < ${C_DATA_LIB}/library-data/catalog.json) -gt 10 ] && echo ja || echo nein" 2>/dev/null | tail -n 1 || true)
     if [[ "$has_lib" == "ja" ]]; then
-        records=$(pct exec "$ct_id" -- /opt/lastbook/venv/bin/python -I -c \
+        records=$(pct exec "$ct_id" -- ${C_APP_DIR}/venv/bin/python -I -c \
             "import json; print(len(json.load(open('${C_DATA_LIB}/library-data/catalog.json'))))" 2>/dev/null | tail -n 1 || true)
         ok "Bibliothek: installiert (${records:-?} Einträge)"
     else
