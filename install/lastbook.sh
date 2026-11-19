@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-INSTALLER_VERSION="1.0.5"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
+INSTALLER_VERSION="1.0.6"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
 APP_NAME="lastbook"
 UPSTREAM_OWNER="Immortal-Protocols"
 UPSTREAM_REPO="lastbook"
@@ -916,6 +916,11 @@ if [ "$ASSIST_REMOVE" = "1" ]; then
 fi
 
 echo ">>> [1/5] Ollama prüfen/installieren ..."
+if ! command -v zstd >/dev/null 2>&1; then
+    echo "    zstd fehlt (Live-Fund: install.sh braucht es zum Entpacken) – installiere ..."
+    apt-get update -qq
+    apt-get install -y -qq zstd >/dev/null
+fi
 if ! command -v ollama >/dev/null 2>&1; then
     curl -fsSL --retry 3 https://ollama.com/install.sh | sh
 else
