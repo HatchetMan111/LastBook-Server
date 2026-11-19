@@ -408,7 +408,7 @@ from pathlib import Path
 HS = Path(os.environ['HARNESS_STATE'])
 MK = HS.parent
 PORT = int(os.environ.get('PORT_API', '8890'))
-APP = MK / 'opt' / 'lastbook' / 'app'
+APP = MK / 'api-fixture'
 STAGED = MK / 'opt' / 'lastbook' / 'LastbookData.setup' / 'unpack' / 'LastbookData'
 TARGET = MK / 'opt' / 'lastbook' / 'LastbookData'
 PEND = MK / 'root' / '.config' / 'Lastbook' / 'setup' / 'pending.json'
@@ -618,11 +618,11 @@ reset_state() {
     : > "$HS/calls.log"
     : > "$API_LOG"
     echo "getent_mode=ok" > "$HS/getent_mode"
-    # Engine-Fixture für die Mock-API (apply_pending mit echtem upstream-Code)
-    mkdir -p "$MK/opt/lastbook/app/engine/setup"
-    cp "$UPSTREAM_INSTALL" "$MK/opt/lastbook/app/engine/setup/install.py"
-    echo '{}' > "$MK/opt/lastbook/app/engine/__init__.py"
-    echo '# mock setup package' > "$MK/opt/lastbook/app/engine/setup/__init__.py"
+    # Engine-Fixture für die Mock-API — bewusst AUSSERHALB von opt/lastbook
+    mkdir -p "$MK/api-fixture/engine/setup"
+    cp "$UPSTREAM_INSTALL" "$MK/api-fixture/engine/setup/install.py"
+    echo '{}' > "$MK/api-fixture/engine/__init__.py"
+    echo '# mock setup package' > "$MK/api-fixture/engine/setup/__init__.py"
 }
 
 seed_ct() { # laufender CT mit installiertem Stack (für Update/Status/Deinstall)

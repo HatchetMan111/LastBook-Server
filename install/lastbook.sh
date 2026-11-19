@@ -30,7 +30,7 @@
 set -Eeuo pipefail
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-INSTALLER_VERSION="1.0.0"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
+INSTALLER_VERSION="1.0.1"   # wird in --status/-Logs ausgegeben – hilft bei Fehlersuche
 APP_NAME="lastbook"
 UPSTREAM_OWNER="Immortal-Protocols"
 UPSTREAM_REPO="lastbook"
@@ -429,6 +429,7 @@ rm -rf /tmp/lastbook-src && mkdir -p /tmp/lastbook-src
 tar -xzf /tmp/lastbook.tar.gz -C /tmp/lastbook-src --strip-components=1
 
 echo ">>> Code nach ${APP_DIR} übernehmen (expliziter Swap, kein mv-INTO) ..."
+mkdir -p "$(dirname "${APP_DIR}")"   # Elternordner existiert im frischen CT noch nicht
 rm -rf "${APP_DIR}.new" "${APP_DIR}.old"
 cp -a /tmp/lastbook-src "${APP_DIR}.new"
 if [ -d "$APP_DIR" ]; then
